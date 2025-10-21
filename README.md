@@ -1,8 +1,8 @@
-# Begehungs-App (Streamlit) – V3.1
+# Begehungs-App (Streamlit) – V3
 
-Patches:
-- robustere Datumseingabe, saubere Reruns
-- klares Fehler-Handling für Blanko-Formular (python-docx)
+Neu:
+- Auto-Start mit Musterkunde (vorausgefüllte Werte).
+- Blanko-Formular (DOCX) zum Ausdrucken.
 
 ## Start
 ```bash

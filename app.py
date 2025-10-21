@@ -1,22 +1,14 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 from io import BytesIO
-from datetime import datetime, date
+from datetime import datetime
+from docx import Document
+from docx.shared import Pt
 
-st.set_page_config(page_title="Begehungs-App (PV/Technik) – V3.1", layout="wide")
-
-# -------- Optional dependency: python-docx (for Blanko-Formular) --------
-DOCX_OK = True
-try:
-    from docx import Document
-    from docx.shared import Pt
-except Exception as e:
-    DOCX_OK = False
-    DOCX_ERR = str(e)
+st.set_page_config(page_title="Begehungs-App (PV/Technik) – V3", layout="wide")
 
 def build_blank_form_docx(templates: dict) -> bytes:
-    if not DOCX_OK:
-        raise RuntimeError(f"'python-docx' fehlt: {DOCX_ERR}")
     doc = Document()
     style = doc.styles['Normal']
     style.font.name = 'Arial'
@@ -65,9 +57,6 @@ def build_blank_form_docx(templates: dict) -> bytes:
     doc.save(out)
     return out.getvalue()
 
-# ----------------------------
-# Session state init
-# ----------------------------
 if "inspections" not in st.session_state:
     st.session_state.inspections = pd.DataFrame(columns=[
         "inspection_id","date","technician","customer_name","customer_email","customer_phone",
@@ -75,7 +64,6 @@ if "inspections" not in st.session_state:
         "variant_combo","item_id","item_group","item_text","status","value","unit","notes"
     ])
 
-# Checklist templates (wie V3)
 if "templates" not in st.session_state:
     st.session_state.templates = {
         "Bronze": [
@@ -155,7 +143,6 @@ if "templates" not in st.session_state:
         ]
     }
 
-# Musterkunde Default (nutzt date.today() statt datetime)
 if "musterkunde" not in st.session_state:
     st.session_state.musterkunde = {
         "customer_name": "WEG Beispielstraße 12",
@@ -167,7 +154,7 @@ if "musterkunde" not in st.session_state:
         "bundesland": "BW",
         "liegenschaftsnummer": "LG-2025-001",
         "technician": "Team Süd – Max & Lea",
-        "date": date.today(),  # safer default
+        "date": datetime.today(),
         "variants": ["Bronze","Silber"],
         "prefill_values": {
             ("Planung","Größe/Leistung PV grob bestimmen (qm × 0,25 kWp/qm) – Schätzung"): ("30", "kWp"),
@@ -180,7 +167,6 @@ def new_id(prefix="INS"):
     ts = datetime.now().strftime("%Y%m%d%H%M%S")
     return f"{prefix}-{ts}"
 
-# Sidebar navigation
 st.sidebar.title("Navigation")
 page = st.sidebar.radio("Ansicht wählen", [
     "Neue Begehung",
@@ -191,11 +177,8 @@ page = st.sidebar.radio("Ansicht wählen", [
     "Hilfe"
 ])
 
-# ----------------------------
-# Page: Neue Begehung
-# ----------------------------
 if page == "Neue Begehung":
-    st.title("📋 Neue Begehung – Musterkunde geladen")
+    st.title("📋 Neue Begehung aufnehmen – mit Musterkunde (Auto-Start)")
     mk = st.session_state.musterkunde
 
     with st.form("form_begehung", clear_on_submit=False):
@@ -214,19 +197,18 @@ if page == "Neue Begehung":
 
         st.subheader("Begehung")
         cols2 = st.columns(3)
-        date_val = cols2[0].date_input("Datum", value=mk["date"])
+        date = cols2[0].date_input("Datum", value=mk["date"])
         technician = cols2[1].text_input("Techniker*in / Team", value=mk["technician"])
         variants = cols2[2].multiselect("Variante(n) (frei kombinierbar)", ["Bronze","Silber","Gold"], default=mk["variants"])
         st.caption("Musterkunde ist vorausgefüllt. Sie können alles überschreiben.")
 
-        # Build checklist
         selected_templates = []
         for v in variants:
             selected_templates.extend(st.session_state.templates.get(v, []))
 
         seen = set()
         checklist_rows = []
-        for item in selected_templates:
+        for idx, item in enumerate(selected_templates):
             key = (item["item_group"], item["item_text"])
             if key in seen:
                 continue
@@ -267,17 +249,16 @@ if page == "Neue Begehung":
         reset_to_muster = c2.form_submit_button("↺ Musterkunde erneut laden")
 
         if reset_to_muster:
-            st.rerun()
+            st.experimental_rerun()
 
         if submitted:
             inspection_id = new_id()
             variant_combo = "+".join(variants) if variants else "keine"
-            # normalize
             records = []
             for i, row in edited_df.iterrows():
                 records.append({
                     "inspection_id": inspection_id,
-                    "date": pd.to_datetime(date_val),
+                    "date": pd.to_datetime(date),
                     "technician": technician,
                     "customer_name": customer_name,
                     "customer_email": customer_email,
@@ -297,12 +278,9 @@ if page == "Neue Begehung":
                 df_add = pd.DataFrame.from_records(records)
                 st.session_state.inspections = pd.concat([st.session_state.inspections, df_add], ignore_index=True)
                 st.success(f"Begehung **{inspection_id}** gespeichert ({len(records)} Zeilen).")
-                st.download_button("⬇️ CSV dieser Begehung", data=df_add.to_csv(index=False).encode("utf-8"),
-                                   file_name=f"{inspection_id}.csv", mime="text/csv")
+                csv_bytes = df_add.to_csv(index=False).encode("utf-8")
+                st.download_button("⬇️ CSV dieser Begehung", data=csv_bytes, file_name=f"{inspection_id}.csv", mime="text/csv")
 
-# ----------------------------
-# CSV Upload
-# ----------------------------
 elif page == "Bestand hochladen (CSV)":
     st.title("📤 CSV hochladen & zusammenführen")
     st.write("Erwartete Spalten (mindestens): inspection_id,date,technician,customer_name,address,city,plz,bundesland,liegenschaftsnummer,variant_combo,item_id,item_group,item_text,status,value,unit,notes")
@@ -319,14 +297,14 @@ elif page == "Bestand hochladen (CSV)":
         except Exception as e:
             st.error(f"Fehler beim Einlesen: {e}")
 
-# ----------------------------
-# Templates bearbeiten
-# ----------------------------
 elif page == "Checklisten bearbeiten":
     st.title("🧩 Checklisten-Vorlagen je Variante")
+    st.caption("Passen Sie die Vorlagen an. Diese steuern die generierte Checkliste für neue Begehungen.")
     variants_all = list(st.session_state.templates.keys())
     selected = st.selectbox("Variante wählen", variants_all, index=0)
-    df_tmpl = pd.DataFrame(st.session_state.templates[selected])
+    tmpl = st.session_state.templates[selected]
+
+    df_tmpl = pd.DataFrame(tmpl)
     edited = st.data_editor(
         df_tmpl,
         num_rows="dynamic",
@@ -339,15 +317,13 @@ elif page == "Checklisten bearbeiten":
         },
         hide_index=True
     )
-    if st.button("💾 Vorlage speichern"):
+    colb = st.columns(3)
+    if colb[0].button("💾 Vorlage speichern"):
         st.session_state.templates[selected] = edited.to_dict(orient="records")
         st.success("Vorlage aktualisiert.")
-    st.download_button("⬇️ Vorlage als CSV", data=edited.to_csv(index=False).encode("utf-8"),
-                       file_name=f"vorlage_{selected.lower()}.csv", mime="text/csv")
+    csv_tmpl = edited.to_csv(index=False).encode("utf-8")
+    st.download_button("⬇️ Vorlage als CSV", data=csv_tmpl, file_name=f"vorlage_{selected.lower()}.csv", mime="text/csv")
 
-# ----------------------------
-# Export
-# ----------------------------
 elif page == "Datenexport / Reporting":
     st.title("📦 Export & Reporting")
     df = st.session_state.inspections.copy()
@@ -380,43 +356,20 @@ elif page == "Datenexport / Reporting":
                 df_export.to_excel(writer, index=False, sheet_name="Begehungen")
             return output.getvalue()
 
-        st.download_button("⬇️ CSV", data=view.to_csv(index=False).encode("utf-8"),
-                           file_name="begehungen_gefiltert.csv", mime="text/csv")
-        st.download_button("⬇️ XLSX", data=to_xlsx_bytes(view),
-                           file_name="begehungen_gefiltert.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        xlsx_bytes = to_xlsx_bytes(view)
+        st.download_button("⬇️ Gefilterte Daten (XLSX)", data=xlsx_bytes, file_name="begehungen_gefiltert.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-# ----------------------------
-# Blanko-Formular
-# ----------------------------
 elif page == "Blanko-Formular":
     st.title("🖨️ Blanko-Formular zum Ausdrucken (DOCX)")
-    if not DOCX_OK:
-        st.error(f"Blanko-Formular benötigt 'python-docx'. Grund: {DOCX_ERR}")
-        st.code("pip install python-docx")
-    else:
-        if st.button("📄 Blanko-Formular erzeugen"):
-            try:
-                doc_bytes = build_blank_form_docx(st.session_state.templates)
-                st.download_button("⬇️ Blanko-Formular (DOCX)", data=doc_bytes, file_name="Blanko_Formular_Begehung.docx",
-                                   mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-            except Exception as e:
-                st.error(f"Fehler beim Erzeugen des Formulars: {e}")
+    st.write("Generiert ein leeres Formular zur Begehung – nutzbar ohne App.")
+    if st.button("📄 Blanko-Formular erzeugen"):
+        doc_bytes = build_blank_form_docx(st.session_state.templates)
+        st.download_button("⬇️ Blanko-Formular (DOCX)", data=doc_bytes, file_name="Blanko_Formular_Begehung.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
-# ----------------------------
-# Hilfe
-# ----------------------------
 elif page == "Hilfe":
-    st.title("ℹ️ Hilfe & Troubleshooting")
+    st.title("ℹ️ Hilfe & Struktur")
     st.markdown("""
-**Neu in V3.1**
-- Sicherere Datumsvorbelegung (`date.today()` statt `datetime`).
-- Blanko-Formular mit klarer Fehlermeldung, wenn `python-docx` fehlt.
-- `st.rerun()` statt `experimental_rerun`.
-
-**Troubleshooting Quick-Checks**
-1. Abhängigkeiten installiert? `pip install -r requirements.txt`
-2. Python-Version 3.9–3.12 empfohlen.
-3. Startbefehl: `streamlit run app.py`
-4. Bei *ModuleNotFoundError* zu `python-docx`: `pip install python-docx`
-5. Browser-Cache leeren oder Inkognito testen.
+**Neu in V3**
+- **Musterkunde beim Start vorausgefüllt** (alle Felder anpassbar).
+- **Blanko-Formular (DOCX)** zum Ausdrucken und händischen Ausfüllen.
     """)
